@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-import { getRunningSessions, getActiveSessions } from './db/sessions.js';
+import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { log } from './log.js';
 import { openSessionDb, sessionDir } from './session-manager.js';
@@ -157,6 +157,20 @@ async function deliverMessage(
     return;
   }
 
+  // Track pending questions for ask_user_question flow
+  if (content.type === 'ask_question' && content.questionId) {
+    createPendingQuestion({
+      question_id: content.questionId,
+      session_id: session.id,
+      message_out_id: msg.id,
+      platform_id: msg.platform_id,
+      channel_type: msg.channel_type,
+      thread_id: msg.thread_id,
+      created_at: new Date().toISOString(),
+    });
+    log.info('Pending question created', { questionId: content.questionId, sessionId: session.id });
+  }
+
   // Channel delivery
   if (!msg.channel_type || !msg.platform_id) {
     log.warn('Message missing routing fields', { id: msg.id });
@@ -180,7 +194,12 @@ async function deliverMessage(
   }
 
   await deliveryAdapter.deliver(msg.channel_type, msg.platform_id, msg.thread_id, msg.kind, msg.content, files);
-  log.info('Message delivered', { id: msg.id, channelType: msg.channel_type, platformId: msg.platform_id, fileCount: files?.length });
+  log.info('Message delivered', {
+    id: msg.id,
+    channelType: msg.channel_type,
+    platformId: msg.platform_id,
+    fileCount: files?.length,
+  });
 
   // Clean up outbox directory after successful delivery
   if (fs.existsSync(outboxDir)) {

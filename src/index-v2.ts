@@ -14,6 +14,9 @@ import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runti
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router-v2.js';
+import { getPendingQuestion, deletePendingQuestion, getSession } from './db/sessions.js';
+import { writeSessionMessage } from './session-manager.js';
+import { wakeContainer } from './container-runner-v2.js';
 import { log } from './log.js';
 
 // Channel imports — each triggers self-registration
@@ -61,6 +64,11 @@ async function main(): Promise<void> {
           platformId,
           name,
           isGroup,
+        });
+      },
+      onAction(questionId, selectedOption, userId) {
+        handleQuestionResponse(questionId, selectedOption, userId).catch((err) => {
+          log.error('Failed to handle question response', { questionId, err });
         });
       },
     };
@@ -114,6 +122,44 @@ function buildConversationConfigs(channelType: string): ConversationConfig[] {
   }
 
   return configs;
+}
+
+/** Handle a user's response to an ask_user_question card. */
+async function handleQuestionResponse(questionId: string, selectedOption: string, userId: string): Promise<void> {
+  const pq = getPendingQuestion(questionId);
+  if (!pq) {
+    log.warn('Pending question not found (may have expired)', { questionId });
+    return;
+  }
+
+  const session = getSession(pq.session_id);
+  if (!session) {
+    log.warn('Session not found for pending question', { questionId, sessionId: pq.session_id });
+    deletePendingQuestion(questionId);
+    return;
+  }
+
+  // Write the response to the session DB as a system message
+  writeSessionMessage(session.agent_group_id, session.id, {
+    id: `qr-${questionId}-${Date.now()}`,
+    kind: 'system',
+    timestamp: new Date().toISOString(),
+    platformId: pq.platform_id,
+    channelType: pq.channel_type,
+    threadId: pq.thread_id,
+    content: JSON.stringify({
+      type: 'question_response',
+      questionId,
+      selectedOption,
+      userId,
+    }),
+  });
+
+  deletePendingQuestion(questionId);
+  log.info('Question response routed', { questionId, selectedOption, sessionId: session.id });
+
+  // Wake the container so the MCP tool's poll picks up the response
+  await wakeContainer(session);
 }
 
 /** Graceful shutdown. */

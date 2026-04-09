@@ -38,8 +38,16 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   let sessionId: string | undefined;
   let resumeAt: string | undefined;
 
+  let pollCount = 0;
   while (true) {
-    const messages = getPendingMessages();
+    // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
+    const messages = getPendingMessages().filter((m) => m.kind !== 'system');
+    pollCount++;
+
+    // Periodic heartbeat so we know the loop is alive
+    if (pollCount % 30 === 0) {
+      log(`Poll heartbeat (${pollCount} iterations, ${messages.length} pending)`);
+    }
 
     if (messages.length === 0) {
       await sleep(POLL_INTERVAL_MS);
@@ -210,7 +218,8 @@ async function processQuery(query: AgentQuery, routing: RoutingContext, config: 
   const pollHandle = setInterval(() => {
     if (done) return;
 
-    const newMessages = getPendingMessages();
+    // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
+    const newMessages = getPendingMessages().filter((m) => m.kind !== 'system');
     if (newMessages.length > 0) {
       const newIds = newMessages.map((m) => m.id);
       markProcessing(newIds);

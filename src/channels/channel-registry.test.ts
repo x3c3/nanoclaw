@@ -103,6 +103,7 @@ describe('channel registry', () => {
       conversations: [],
       onInbound: () => {},
       onMetadata: () => {},
+      onAction: () => {},
     }));
 
     // Should not have any active adapters for channels with null factory returns
@@ -205,6 +206,7 @@ describe('channel + router integration', () => {
       conversations: [],
       onInbound: () => {},
       onMetadata: () => {},
+      onAction: () => {},
     }));
 
     // Set up delivery adapter bridge (same pattern as index-v2.ts)

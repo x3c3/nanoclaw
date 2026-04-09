@@ -17,6 +17,6 @@ registerChannelAdapter('discord', {
       publicKey: env.DISCORD_PUBLIC_KEY,
       applicationId: env.DISCORD_APPLICATION_ID,
     });
-    return createChatSdkBridge({ adapter: discordAdapter, concurrency: 'concurrent' });
+    return createChatSdkBridge({ adapter: discordAdapter, concurrency: 'concurrent', botToken: env.DISCORD_BOT_TOKEN });
   },
 });
