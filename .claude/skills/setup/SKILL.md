@@ -89,7 +89,23 @@ Run `pnpm exec tsx setup/index.ts --step timezone` and parse the status block.
   - macOS: install via `brew install --cask docker`, then `open -a Docker` and wait for it to start. If brew not available, direct to Docker Desktop download at https://docker.com/products/docker-desktop
   - Linux: install with `curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker $USER`. Note: user may need to log out/in for group membership.
 
-### 3b. Build and test
+### 3b. CJK fonts
+
+Agent containers skip CJK fonts by default (~200MB saved). Without them, Chromium-rendered screenshots and PDFs show tofu for Chinese/Japanese/Korean.
+
+- **User writing to you in Chinese, Japanese, or Korean** → enable without asking. Mention it briefly.
+- **Resolved timezone from step 2a is a CJK region** (`Asia/Tokyo`, `Asia/Shanghai`, `Asia/Hong_Kong`, `Asia/Taipei`, `Asia/Seoul`) or other signal short of active CJK use → ask: "Enable CJK fonts? Adds ~200MB, lets the agent render CJK in screenshots and PDFs."
+- **Otherwise** → skip.
+
+To enable, write `INSTALL_CJK_FONTS=true` to `.env`:
+
+```bash
+grep -q '^INSTALL_CJK_FONTS=' .env && sed -i.bak 's/^INSTALL_CJK_FONTS=.*/INSTALL_CJK_FONTS=true/' .env && rm -f .env.bak || echo 'INSTALL_CJK_FONTS=true' >> .env
+```
+
+The next step's build picks it up automatically.
+
+### 3c. Build and test
 
 Run `pnpm exec tsx setup/index.ts --step container -- --runtime docker` and parse the status block.
 
