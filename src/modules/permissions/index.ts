@@ -28,6 +28,7 @@ import {
 import type { InboundEvent } from '../../channels/adapter.js';
 import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
+import { resolveSession, writeSessionMessage } from '../../session-manager.js';
 import type { MessagingGroup, MessagingGroupAgent } from '../../types.js';
 import { canAccessAgentGroup } from './access.js';
 import { requestChannelApproval } from './channel-approval.js';
@@ -378,6 +379,75 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   // attempt sees a wired channel (agentCount > 0) and takes the fan-out
   // path normally.
   deletePendingChannelApproval(row.messaging_group_id);
+
+  // Seed a /welcome onboarding task into the session *before* the replayed
+  // message so the agent greets the new user on first contact. Mirrors the
+  // owner-setup path (setup/register.ts). Without this, a Telegram user's
+  // default `/start` greeting gets silently dropped by the agent-runner's
+  // command filter and the first interaction produces nothing.
+  //
+  // The prompt pins the exact destination by name: createMessagingGroupAgent
+  // above auto-created an `agent_destinations` row pointing at this messaging
+  // group, and we look it up here. Without that, the agent — which already
+  // knows about the owner's DM and earlier friends' DMs as named destinations
+  // — tends to greet the owner (CLAUDE.md anchors on them). Passing the
+  // specific destination name removes the ambiguity entirely.
+  try {
+    const { session } = resolveSession(row.agent_group_id, row.messaging_group_id, event.threadId, 'shared');
+    const parsed = safeParseContent(event.message.content);
+    const author =
+      parsed && typeof parsed === 'object' && 'author' in parsed && typeof (parsed as { author?: unknown }).author === 'object'
+        ? ((parsed as { author: Record<string, unknown> }).author)
+        : undefined;
+    const senderName =
+      (typeof (parsed as { senderName?: unknown }).senderName === 'string' ? (parsed as { senderName: string }).senderName : undefined) ??
+      (typeof (parsed as { sender?: unknown }).sender === 'string' ? (parsed as { sender: string }).sender : undefined) ??
+      (typeof author?.fullName === 'string' ? (author.fullName as string) : undefined) ??
+      (typeof author?.userName === 'string' ? (author.userName as string) : undefined) ??
+      null;
+    const senderLabel = senderName ? `${senderName} (${event.platformId})` : event.platformId;
+
+    // Pin the destination. Guarded behind hasTable in case the agent-to-agent
+    // module isn't installed — without it there are no named destinations at
+    // all, so the agent's send_message call falls through to session default
+    // routing (which is this new user). Either way, unambiguous.
+    let destinationClause: string;
+    const { hasTable, getDb } = await import('../../db/connection.js');
+    if (hasTable(getDb(), 'agent_destinations')) {
+      const { getDestinationByTarget } = await import('../agent-to-agent/db/agent-destinations.js');
+      const dest = getDestinationByTarget(row.agent_group_id, 'channel', row.messaging_group_id);
+      destinationClause = dest
+        ? `Send your welcome with send_message(to: '${dest.local_name}', text: ...) — that destination resolves to their DM.`
+        : `Reply using send_message with no \`to\` — the session's default routing points at their DM.`;
+    } else {
+      destinationClause = `Reply using send_message — it will land in their DM.`;
+    }
+
+    writeSessionMessage(row.agent_group_id, session.id, {
+      id: `onboard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'task',
+      timestamp: new Date().toISOString(),
+      platformId: event.platformId,
+      channelType: event.channelType,
+      content: JSON.stringify({
+        prompt:
+          `A new ${event.channelType} user — ${senderLabel} — just started a conversation. ` +
+          `Run /welcome to introduce yourself to them. ${destinationClause}`,
+      }),
+    });
+    log.info('Onboarding message seeded after channel approval', {
+      sessionId: session.id,
+      messagingGroupId: row.messaging_group_id,
+      agentGroupId: row.agent_group_id,
+      senderName,
+    });
+  } catch (err) {
+    // Don't block the replay if onboarding write fails.
+    log.error('Failed to seed onboarding message after channel approval', {
+      messagingGroupId: row.messaging_group_id,
+      err,
+    });
+  }
 
   try {
     await routeInbound(event);

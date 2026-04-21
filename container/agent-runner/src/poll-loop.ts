@@ -1,7 +1,7 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
-import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import { touchHeartbeat, clearStaleProcessingAcks, getOutboundDb } from './db/connection.js';
 import { getStoredSessionId, setStoredSessionId, clearStoredSessionId } from './db/session-state.js';
 import { formatMessages, extractRouting, categorizeMessage, stripInternalTags, type RoutingContext } from './formatter.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
@@ -280,6 +280,17 @@ async function processQuery(query: AgentQuery, routing: RoutingContext): Promise
   let queryContinuation: string | undefined;
   let done = false;
 
+  // Track the outbound row count between result events. When the agent uses
+  // send_message (or any MCP tool that writes to messages_out) during a turn,
+  // the count grows. We pass that signal to dispatchResultText so it can tell
+  // the difference between "agent wrote text meant as the reply" (send the
+  // scratchpad) and "agent did explicit tool sends AND then emitted a trailing
+  // status line" (don't echo the status line back to the channel).
+  //
+  // Reset after each result dispatch so subsequent turns in the same query
+  // (follow-up messages pushed into the stream) are evaluated independently.
+  let outboundAtLastResult = getOutboundCount();
+
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open is
   // strictly cheaper than close+reopen (no cold prompt cache, no reconnect).
@@ -323,7 +334,9 @@ async function processQuery(query: AgentQuery, routing: RoutingContext): Promise
       if (event.type === 'init') {
         queryContinuation = event.continuation;
       } else if (event.type === 'result' && event.text) {
-        dispatchResultText(event.text, routing);
+        const hasExplicitSends = getOutboundCount() > outboundAtLastResult;
+        dispatchResultText(event.text, routing, hasExplicitSends);
+        outboundAtLastResult = getOutboundCount();
       }
     }
   } finally {
@@ -363,7 +376,7 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * This preserves the simple case of one user on one channel — the agent
  * doesn't need to know about wrapping syntax at all.
  */
-function dispatchResultText(text: string, routing: RoutingContext): void {
+function dispatchResultText(text: string, routing: RoutingContext, hasExplicitSends: boolean): void {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
@@ -397,7 +410,15 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
   // Single-destination shortcut: the agent wrote plain text — send to
   // the session's originating channel (from session_routing) if available,
   // otherwise fall back to the single destination.
-  if (sent === 0 && scratchpad) {
+  //
+  // If the agent already sent messages explicitly this turn (via send_message
+  // or another MCP tool that writes to outbound), treat trailing plain text as
+  // a status/summary line and DO NOT echo it back to the channel. Without this
+  // guard, task-driven flows like the onboarding /welcome cause duplicate
+  // delivery: the skill uses `send_message` to greet the new user, then the
+  // model emits "Welcome message sent." which used to be dispatched as a
+  // second chat message to the same recipient.
+  if (sent === 0 && scratchpad && !hasExplicitSends) {
     if (routing.channelType && routing.platformId) {
       // Reply to the channel/thread the message came from
       writeMessageOut({
@@ -422,9 +443,13 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
   }
 
-  if (sent === 0 && text.trim()) {
+  if (sent === 0 && text.trim() && !hasExplicitSends) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
+}
+
+function getOutboundCount(): number {
+  return (getOutboundDb().prepare('SELECT COUNT(*) AS c FROM messages_out').get() as { c: number }).c;
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {

@@ -247,6 +247,87 @@ describe('unknown-channel registration flow', () => {
     expect(wakeContainer).toHaveBeenCalled();
   });
 
+  it('approve → seeds a /welcome onboarding task into the session', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+
+    // `/start` is filtered by the agent-runner (Claude Code slash command),
+    // so without the seeded onboarding task a Telegram user's first DM would
+    // produce zero response. The seed ensures the agent runs /welcome regardless.
+    const startDm = {
+      channelType: 'telegram',
+      platformId: 'dm-new-friend',
+      threadId: null,
+      message: {
+        id: 'msg-start',
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'friend', senderName: 'Friend', text: '/start' }),
+        timestamp: now(),
+        isMention: true,
+      },
+    };
+    await routeInbound(startDm);
+    await new Promise((r) => setTimeout(r, 10));
+
+    const { getDb } = await import('../../db/connection.js');
+    const pending = getDb()
+      .prepare('SELECT messaging_group_id, agent_group_id FROM pending_channel_approvals')
+      .get() as { messaging_group_id: string; agent_group_id: string };
+
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'approve',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    // Look up the session that got created, then open its inbound.db and
+    // confirm an onboarding task with a /welcome prompt landed before the
+    // replayed chat message.
+    const session = getDb()
+      .prepare('SELECT id FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ?')
+      .get(pending.agent_group_id, pending.messaging_group_id) as { id: string } | undefined;
+    expect(session).toBeDefined();
+
+    const Database = (await import('better-sqlite3')).default;
+    const path = await import('path');
+    const inboundPath = path.join(TEST_DIR, 'v2-sessions', pending.agent_group_id, session!.id, 'inbound.db');
+    const inbound = new Database(inboundPath, { readonly: true });
+    const rows = inbound
+      .prepare('SELECT kind, content, seq FROM messages_in ORDER BY seq')
+      .all() as { kind: string; content: string; seq: number }[];
+    inbound.close();
+
+    const taskRow = rows.find((r) => r.kind === 'task');
+    expect(taskRow).toBeDefined();
+    const prompt: string = JSON.parse(taskRow!.content).prompt;
+    expect(prompt).toMatch(/\/welcome/);
+    // Prompt must name the new user — otherwise with multiple destinations
+    // configured the model may greet the owner instead of the new sender
+    // (see bug where "Hey Daniel!" landed in the owner's DM).
+    expect(prompt).toContain('Friend');
+    expect(prompt).toContain('dm-new-friend');
+
+    // Prompt must pin the exact destination by its agent_destinations
+    // local_name. That name is auto-created by createMessagingGroupAgent
+    // above; look it up and assert it appears in the prompt verbatim.
+    const destRow = getDb()
+      .prepare('SELECT local_name FROM agent_destinations WHERE agent_group_id = ? AND target_id = ?')
+      .get(pending.agent_group_id, pending.messaging_group_id) as { local_name: string };
+    expect(destRow).toBeDefined();
+    expect(prompt).toContain(`send_message(to: '${destRow.local_name}'`);
+
+    // Order: task seeded before the replayed /start chat message.
+    const chatRow = rows.find((r) => r.kind === 'chat');
+    expect(chatRow).toBeDefined();
+    expect(taskRow!.seq).toBeLessThan(chatRow!.seq);
+  });
+
   it('approve on a DM wires with pattern="." defaults', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
