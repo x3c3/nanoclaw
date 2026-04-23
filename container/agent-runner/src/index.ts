@@ -79,6 +79,14 @@ async function main(): Promise<void> {
       args: ['run', mcpServerPath],
       env: {},
     },
+    atomic_chat: {
+      command: 'bun',
+      args: ['run', path.join(__dirname, 'atomic-chat-mcp-stdio.ts')],
+      env: {
+        ...(process.env.ATOMIC_CHAT_HOST ? { ATOMIC_CHAT_HOST: process.env.ATOMIC_CHAT_HOST } : {}),
+        ...(process.env.ATOMIC_CHAT_API_KEY ? { ATOMIC_CHAT_API_KEY: process.env.ATOMIC_CHAT_API_KEY } : {}),
+      },
+    },
   };
 
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
