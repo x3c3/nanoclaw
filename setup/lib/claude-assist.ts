@@ -28,7 +28,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { ensureAnswer } from './runner.js';
-import { fitToWidth, note } from './theme.js';
+import { brandBody, fitToWidth, fmtDuration, note } from './theme.js';
 
 export interface AssistContext {
   stepName: string;
@@ -110,7 +110,7 @@ export async function offerClaudeAssist(
 
   const parsed = parseResponse(response);
   if (!parsed) {
-    p.log.warn("Claude responded but I couldn't parse a command out of it.");
+    p.log.warn(brandBody("Claude responded but I couldn't parse a command out of it."));
     p.log.message(k.dim(response.trim().slice(0, 500)));
     return false;
   }
@@ -295,9 +295,8 @@ async function queryClaudeUnderSpinner(
     // Move cursor back to the start of the block (WINDOW_SIZE + 1 = header + window).
     out.write(`\x1b[${WINDOW_SIZE + 1}A`);
 
-    const elapsed = Math.round((Date.now() - start) / 1000);
     const icon = SPINNER_FRAMES[frameIdx % SPINNER_FRAMES.length];
-    const suffix = ` (${elapsed}s)`;
+    const suffix = ` (${fmtDuration(Date.now() - start)})`;
     const header = fitToWidth('Asking Claude to diagnose…', suffix);
     out.write(`\x1b[2K${k.cyan(icon)}  ${header}${k.dim(suffix)}\n`);
 
@@ -355,10 +354,9 @@ async function queryClaudeUnderSpinner(
       clearBlock();
       out.write(SHOW_CURSOR);
       process.off('exit', restoreCursorOnExit);
-      const elapsed = Math.round((Date.now() - start) / 1000);
-      const suffix = ` (${elapsed}s)`;
+      const suffix = ` (${fmtDuration(Date.now() - start)})`;
       if (kind === 'ok') {
-        p.log.success(`${fitToWidth('Claude replied.', suffix)}${k.dim(suffix)}`);
+        p.log.success(`${brandBody(fitToWidth('Claude replied.', suffix))}${k.dim(suffix)}`);
         resolve(payload);
       } else {
         p.log.error(
