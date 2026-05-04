@@ -129,10 +129,136 @@ rm -f  "$PROGRESS_LOG"
 mkdir -p "$STEPS_DIR" "$LOGS_DIR"
 write_header
 
-# NanoClaw wordmark + subtitle — setup:auto will see NANOCLAW_BOOTSTRAPPED=1
-# and skip printing these again, so the flow stays visually continuous.
-printf '\n  %s%s\n' "$(bold 'Nano')" "$(brand_bold 'Claw')"
-printf '  %s\n\n' "$(dim 'Setting up your personal AI assistant')"
+# NanoClaw splash — under-the-sea lobster mascot in truecolor braille,
+# with the figlet wordmark and taglines below. Pre-rendered into
+# assets/setup-splash.txt (built from assets/nanoclaw-icon.png via chafa +
+# figlet); the bash script just streams the literal frame. clack's intro
+# then carries the "let's get you set up" framing — setup:auto sees
+# NANOCLAW_BOOTSTRAPPED=1 and skips re-printing the wordmark.
+cat "$PROJECT_ROOT/assets/setup-splash.txt"
+
+# ─── pre-flight: minimum hardware specs ────────────────────────────────
+# NanoClaw runs an agent container per session. Below these thresholds the
+# host + container + agent will struggle (OOM under load, image + session
+# DBs filling the disk). Soft warn — `df` only sees the partition that
+# $PROJECT_ROOT lives on, which can underreport on hosts with separate
+# /home or /var mounts, so the user can override.
+
+# RAM floor is set below 4 GB because "4 GB" VMs typically report 3700–3900 MB
+# after kernel reserves (e.g. Hetzner CX21 ≈ 3814, AWS t3.medium ≈ 3800).
+MIN_MEM_MB=3700
+MIN_DISK_GB=20
+
+detect_mem_mb() {
+  case "$(uname -s)" in
+    Linux)
+      awk '/^MemTotal:/ {printf "%d", $2 / 1024}' /proc/meminfo 2>/dev/null
+      ;;
+    Darwin)
+      local bytes
+      bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+      echo $(( bytes / 1024 / 1024 ))
+      ;;
+  esac
+}
+
+detect_disk_gb() {
+  # -P: POSIX format (no line-wrapping); -k: 1024-byte blocks. Avail is col 4.
+  df -Pk "$PROJECT_ROOT" 2>/dev/null \
+    | awk 'NR==2 { printf "%d", $4 / 1024 / 1024 }'
+}
+
+MEM_MB=$(detect_mem_mb)
+DISK_GB=$(detect_disk_gb)
+: "${MEM_MB:=0}"
+: "${DISK_GB:=0}"
+
+LOW_MEM=false; LOW_DISK=false
+[ "$MEM_MB"  -gt 0 ] && [ "$MEM_MB"  -lt "$MIN_MEM_MB" ]  && LOW_MEM=true
+[ "$DISK_GB" -gt 0 ] && [ "$DISK_GB" -lt "$MIN_DISK_GB" ] && LOW_DISK=true
+
+if [ "$LOW_MEM" = true ] || [ "$LOW_DISK" = true ]; then
+  printf '  %s\n' "$(red 'Warning: this machine likely cannot run NanoClaw.')"
+  printf '  %s\n' "$(dim 'NanoClaw recommends a 4 GB+ machine with 20 GB+ free disk. Below this,')"
+  printf '  %s\n' "$(dim 'the host + agent container will run out of memory or disk under most')"
+  printf '  %s\n' "$(dim 'workloads. A stronger machine is strongly recommended.')"
+  [ "$LOW_MEM"  = true ] && printf '  %s\n' "$(dim "  · Detected RAM:                 ${MEM_MB} MB")"
+  [ "$LOW_DISK" = true ] && printf '  %s\n' "$(dim "  · Free disk on $PROJECT_ROOT: ${DISK_GB} GB")"
+  printf '\n'
+  read -r -p "  $(bold 'Try anyway?') [y/N] " SPECS_ANS </dev/tty
+
+  case "${SPECS_ANS:-N}" in
+    [Yy]*)
+      ph_event setup_low_specs_continued mem_mb="$MEM_MB" disk_gb="$DISK_GB" low_mem="$LOW_MEM" low_disk="$LOW_DISK"
+      printf '\n'
+      ;;
+    *)
+      ph_event setup_low_specs_aborted mem_mb="$MEM_MB" disk_gb="$DISK_GB" low_mem="$LOW_MEM" low_disk="$LOW_DISK"
+      printf '\n  %s\n\n' "$(dim 'Aborted. Re-run after upgrading the host or freeing disk space.')"
+      exit 1
+      ;;
+  esac
+fi
+
+# ─── pre-flight: Google Cloud VM warning (Linux) ──────────────────────
+# NanoClaw is known to not run reliably on Google Compute Engine instances.
+# Warn early — before the root check or bootstrap spinner — so users can
+# switch providers before sinking time into setup. Detection uses DMI
+# (no network round-trip), which on GCE reports "Google" / "Google
+# Compute Engine".
+if [ "$(uname -s)" = "Linux" ] \
+  && { grep -qi 'Google' /sys/class/dmi/id/product_name 2>/dev/null \
+    || grep -qi 'Google' /sys/class/dmi/id/sys_vendor   2>/dev/null; }; then
+  printf '  %s\n' "$(red 'Warning: Google Cloud VM detected.')"
+  printf '  %s\n' "$(dim 'Google blocks sudo commands, so NanoClaw is unlikely to run successfully on this VM.')"
+  printf '  %s\n\n' "$(dim 'If you want to run NanoClaw successfully, switch to a different provider (Hetzner, Hostinger, exe.dev and others..).')"
+  read -r -p "  $(bold 'Try anyway?') [y/N] " GCE_ANS </dev/tty
+
+  case "${GCE_ANS:-N}" in
+    [Yy]*)
+      ph_event setup_gce_continued
+      printf '\n'
+      ;;
+    *)
+      ph_event setup_gce_aborted
+      printf '\n  %s\n\n' "$(dim 'Aborted. Re-run on a non-GCE host to continue.')"
+      exit 1
+      ;;
+  esac
+fi
+
+# ─── pre-flight: root user warning (Linux) ────────────────────────────
+if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -eq 0 ]; then
+  printf '  %s\n' \
+    "$(red 'Warning: you are running as root.')"
+  printf '  %s\n' \
+    "$(dim "Running NanoClaw as root is not recommended. It can cause permission")"
+  printf '  %s\n\n' \
+    "$(dim "issues with containers, services, and file ownership.")"
+  printf '  %s\n' "$(bold '1)') $(dim 'Show me instructions for creating a new Linux user')"
+  printf '  %s\n\n' "$(bold '2)') $(dim 'Continue setting up NanoClaw as root user (not recommended)')"
+  read -r -p "  $(bold 'Choose [1/2]: ')" ROOT_ANS </dev/tty
+
+  case "${ROOT_ANS:-1}" in
+    2)
+      ph_event setup_root_continued
+      printf '\n'
+      ;;
+    *)
+      ph_event setup_root_aborted
+      printf '\n  %s\n' "$(bold 'To set up a regular user (via SSH):')"
+      printf '  %s\n\n' "$(dim 'Not using SSH? Refer to your hosting provider docs or ask your coding agent to help you set up SSH access.')"
+      printf '  %s\n' "$(dim '1. Create a new user:           adduser nanoclaw')"
+      printf '  %s\n' "$(dim '2. Add to sudo group:           usermod -aG sudo nanoclaw')"
+      printf '  %s\n' "$(dim '3. Enable passwordless sudo:    echo "nanoclaw ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/nanoclaw')"
+      printf '  %s\n' "$(dim '4. Log out:                     exit')"
+      printf '  %s\n' "$(dim '5. Log back in as the new user: ssh nanoclaw@your-server')"
+      printf '  %s\n' "$(dim '6. Clone the repo:              git clone https://github.com/qwibitai/nanoclaw.git && cd nanoclaw')"
+      printf '  %s\n\n' "$(dim '7. Re-run setup:               bash nanoclaw.sh')"
+      exit 1
+      ;;
+  esac
+fi
 
 # ─── pre-flight: Homebrew on macOS ─────────────────────────────────────
 # setup/install-node.sh and setup/install-docker.sh both require `brew` on
@@ -188,9 +314,6 @@ BOOTSTRAP_RAW="${STEPS_DIR}/01-bootstrap.log"
 BOOTSTRAP_LABEL="Installing the basics"
 BOOTSTRAP_START=$(date +%s)
 
-# One-line "why" that teaches a differentiator while the user waits.
-printf '%s  %s\n' "$(gray '│')" \
-  "$(dim "NanoClaw is small and runs entirely on your machine. Yours to modify.")"
 spinner_start "$BOOTSTRAP_LABEL"
 
 # Run in the background so we can tick elapsed time. Capture exit code via
@@ -222,7 +345,7 @@ rm -f "$BOOTSTRAP_EXIT_FILE"
 BOOTSTRAP_DUR=$(( $(date +%s) - BOOTSTRAP_START ))
 
 if [ "$BOOTSTRAP_RC" -eq 0 ]; then
-  spinner_success "Basics installed" "$BOOTSTRAP_DUR"
+  spinner_success "Basics ready" "$BOOTSTRAP_DUR"
   write_bootstrap_entry success "$BOOTSTRAP_DUR" "$BOOTSTRAP_RAW"
 else
   spinner_failure "Couldn't install the basics" "$BOOTSTRAP_DUR"
@@ -259,4 +382,5 @@ fi
 # --silent suppresses pnpm's `> nanoclaw@2.0.0 setup:auto / > tsx setup/auto.ts`
 # preamble so the flow continues visually from "Basics installed" straight
 # into setup:auto's spinner. exec so signals (Ctrl-C) propagate directly.
-exec pnpm --silent run setup:auto
+# `-- "$@"` forwards any flags (e.g. --onecli-api-host) to setup:auto.
+exec pnpm --silent run setup:auto -- "$@"
