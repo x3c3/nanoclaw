@@ -1,6 +1,16 @@
 import type { ContainerConfigRow } from '../types.js';
 import { getDb } from './connection.js';
 
+const SCALAR_COLUMNS = new Set([
+  'provider',
+  'model',
+  'effort',
+  'image_tag',
+  'assistant_name',
+  'max_messages_per_prompt',
+]);
+const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
+
 export function getContainerConfig(agentGroupId: string): ContainerConfigRow | undefined {
   return getDb().prepare('SELECT * FROM container_configs WHERE agent_group_id = ?').get(agentGroupId) as
     | ContainerConfigRow
@@ -37,9 +47,6 @@ export function ensureContainerConfig(agentGroupId: string): void {
     )
     .run(agentGroupId, new Date().toISOString());
 }
-
-const SCALAR_COLUMNS = new Set(['provider', 'model', 'effort', 'image_tag', 'assistant_name', 'max_messages_per_prompt']);
-const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
 
 /** Update scalar fields on a config row. Only touches fields present in `updates`. */
 export function updateContainerConfigScalars(
